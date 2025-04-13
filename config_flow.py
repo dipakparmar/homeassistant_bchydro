@@ -8,7 +8,7 @@ from homeassistant.core import callback
 from homeassistant.data_entry_flow import FlowResult
 
 from .const import DOMAIN
-from bchydro import BCHydroApi
+from .api import BCHydroApi
 
 
 class BCHydroConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):

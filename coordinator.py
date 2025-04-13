@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import timedelta
 import logging
 
-from bchydro import BCHydroApi
+from .api import BCHydroApi
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 
@@ -33,7 +33,7 @@ class BCHydroCoordinator(DataUpdateCoordinator):
             return {
                 "latest_usage": await self.api.get_latest_usage(),
                 "latest_cost": await self.api.get_latest_cost(),
-                "billing_period_end": self.api.latest_interval.get("billing_period_end"),
+                "billing_period_end": (await self.api.get_latest_interval()).get("billing_period_end"),
             }
         except Exception as err:
             raise UpdateFailed(f"Error fetching data: {err}") from err
