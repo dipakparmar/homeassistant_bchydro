@@ -8,5 +8,5 @@
   "documentation": "https://www.home-assistant.io/integrations/bchydro",
   "iot_class": "cloud_polling",
   "loggers": ["bchydro"],
-  "requirements": ["bchydro==0.8.1"]
+  "requirements": ["aiohttp==3.7.3", "bchydro==0.8.1"]
 }
