@@ -5,12 +5,14 @@ from datetime import datetime
 from typing import Dict, Optional
 
 from bs4 import BeautifulSoup
-from playwright.async_api import async_playwright, Browser, Page
+from selenium.webdriver import ChromeOptions
+from selenium.webdriver.common.by import By
+from selenium.webdriver.support import expected_conditions as EC
+from selenium.webdriver.support.ui import WebDriverWait
+from seleniumwire import webdriver
 
 from .const import (
-    ENUM_CURRENT_BILLING_PERIOD,
     URL_LOGIN_PAGE,
-    URL_POST_LOGIN,
     USER_AGENT,
 )
 from .exceptions import (
@@ -35,8 +37,7 @@ class BCHydroApi:
         """Initialize the API client."""
         self.username = username
         self.password = password
-        self._browser: Optional[Browser] = None
-        self._page: Optional[Page] = None
+        self._driver = None
         self._authenticated = False
         
         # Cache for data
@@ -46,13 +47,21 @@ class BCHydroApi:
 
     async def _ensure_browser(self) -> None:
         """Ensure browser is running."""
-        if not self._browser:
-            playwright = await async_playwright().start()
-            self._browser = await playwright.chromium.launch(
-                headless=True,
-            )
-            self._page = await self._browser.new_page(
-                user_agent=USER_AGENT,
+        if not self._driver:
+            options = ChromeOptions()
+            options.add_argument('--headless')
+            options.add_argument('--no-sandbox')
+            options.add_argument('--disable-dev-shm-usage')
+            options.add_argument(f'user-agent={USER_AGENT}')
+            
+            # Set up wire options for better performance
+            wire_options = {
+                'connection_timeout': None  # Don't timeout
+            }
+            
+            self._driver = webdriver.Chrome(
+                options=options,
+                seleniumwire_options=wire_options
             )
 
     async def _authenticate(self) -> None:
@@ -61,33 +70,38 @@ class BCHydroApi:
             return
 
         await self._ensure_browser()
-        if not self._page:
-            raise BCHydroAuthException("Browser page not initialized")
 
         try:
-            # Navigate to login page
-            await self._page.goto(URL_LOGIN_PAGE)
+            self._driver.get(URL_LOGIN_PAGE)
 
-            # Fill in login form
-            await self._page.fill("#username", self.username)
-            await self._page.fill("#password", self.password)
-
-            # Click submit and wait for navigation
-            await asyncio.gather(
-                self._page.wait_for_navigation(),
-                self._page.click("#loginSubmit"),
+            # Wait for and fill in login form
+            username_field = WebDriverWait(self._driver, 10).until(
+                EC.presence_of_element_located((By.ID, "username"))
             )
+            password_field = self._driver.find_element(By.ID, "password")
+            submit_button = self._driver.find_element(By.ID, "loginSubmit")
+
+            username_field.send_keys(self.username)
+            password_field.send_keys(self.password)
+            submit_button.click()
 
             # Check for error messages
-            error_msg = await self._page.query_selector(".alert.error:not(.hidden)")
-            if error_msg:
-                error_text = await error_msg.text_content()
-                raise BCHydroAuthException(f"Login failed: {error_text}")
+            try:
+                error_msg = WebDriverWait(self._driver, 3).until(
+                    EC.presence_of_element_located((By.CSS_SELECTOR, ".alert.error:not(.hidden)"))
+                )
+                raise BCHydroAuthException(f"Login failed: {error_msg.text}")
+            except Exception:
+                pass  # No error message found, continue
 
             # If multiple accounts, select first one
-            account_list = await self._page.query_selector_all(".accountListDiv")
-            if account_list:
-                await account_list[0].click()
+            try:
+                account = WebDriverWait(self._driver, 3).until(
+                    EC.presence_of_element_located((By.CLASS_NAME, "accountListDiv"))
+                )
+                account.click()
+            except Exception:
+                pass  # No account selection needed
 
             self._authenticated = True
 
@@ -95,34 +109,24 @@ class BCHydroApi:
             self._authenticated = False
             raise BCHydroAuthException(f"Authentication failed: {str(err)}") from err
 
-    async def _validate_html(self, html: str) -> BeautifulSoup:
-        """Validate HTML response."""
-        if not html:
-            raise BCHydroInvalidHtmlException("Empty HTML response")
-
-        soup = BeautifulSoup(html, "html.parser")
-        
-        # Check for alert dialogs
-        alerts = soup.select(".alert.error:not(.hidden)")
-        if alerts:
-            error_msg = " ".join(alert.get_text(strip=True) for alert in alerts)
-            raise BCHydroAlertDialogException(f"Alert dialog detected: {error_msg}")
-
-        return soup
-
     async def refresh(self) -> None:
         """Refresh account data."""
         if not self._authenticated:
             await self._authenticate()
 
         try:
-            # Navigate to consumption page
-            await self._page.click("#ViewAndPayProfile")
-            await self._page.wait_for_selector("#consumptionTableSection")
+            # Navigate to consumption page and wait for data
+            self._driver.find_element(By.ID, "ViewAndPayProfile").click()
+            WebDriverWait(self._driver, 10).until(
+                EC.presence_of_element_located((By.ID, "consumptionTableSection"))
+            )
 
             # Get latest usage data
-            table_html = await self._page.inner_html("#consumptionTableSection")
-            soup = await self._validate_html(table_html)
+            table_section = self._driver.find_element(By.ID, "consumptionTableSection")
+            table_html = table_section.get_attribute('outerHTML')
+            
+            soup = BeautifulSoup(table_html, "html.parser")
+            self._check_for_errors(soup)
 
             # Parse consumption data
             self._usage = self._parse_consumption_data(soup)
@@ -132,6 +136,13 @@ class BCHydroApi:
         except Exception as err:
             self._authenticated = False
             raise BCHydroAuthException(f"Failed to refresh data: {str(err)}") from err
+
+    def _check_for_errors(self, soup: BeautifulSoup) -> None:
+        """Check for error messages in the HTML."""
+        alerts = soup.select(".alert.error:not(.hidden)")
+        if alerts:
+            error_msg = " ".join(alert.get_text(strip=True) for alert in alerts)
+            raise BCHydroAlertDialogException(f"Alert dialog detected: {error_msg}")
 
     def _parse_consumption_data(self, soup: BeautifulSoup) -> BCHydroDailyUsage:
         """Parse consumption data from HTML."""
@@ -147,10 +158,17 @@ class BCHydroApi:
                 continue
 
             date_str = cells[0].get_text(strip=True)
-            consumption = float(cells[1].get_text(strip=True))
-            cost = float(cells[2].get_text(strip=True).replace("$", ""))
-            
-            date = datetime.strptime(date_str, "%b %d, %Y")
+            try:
+                consumption = float(cells[1].get_text(strip=True))
+                cost = float(cells[2].get_text(strip=True).replace("$", "").strip())
+            except ValueError:
+                continue  # Skip rows with invalid numbers
+                
+            try:
+                date = datetime.strptime(date_str, "%b %d, %Y")
+            except ValueError:
+                continue  # Skip rows with invalid dates
+
             interval = BCHydroInterval(
                 start=date,
                 end=date,
@@ -163,6 +181,9 @@ class BCHydroApi:
                     interval=interval,
                 )
             )
+
+        if not electricity:
+            raise BCHydroInvalidHtmlException("No valid consumption data found")
 
         # Create usage object
         return BCHydroDailyUsage(
@@ -207,5 +228,5 @@ class BCHydroApi:
 
     async def __aexit__(self, exc_type, exc_val, exc_tb):
         """Async exit."""
-        if self._browser:
-            await self._browser.close()
+        if self._driver:
+            self._driver.quit()
