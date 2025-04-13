@@ -1,7 +1,7 @@
 {
   "domain": "bchydro",
   "name": "BC Hydro",
-  "version: "0.0.1",
+  "version": "0.0.1",
   "codeowners": ["@dipakparmar"],
   "config_flow": true,
   "dependencies": ["recorder"],
